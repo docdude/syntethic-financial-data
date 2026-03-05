@@ -1,0 +1,47 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# TensorBoard logs
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large data files (raw market data)
+data/raw/alpaca_processed.csv
+data/raw/alpaca_stock_data.numpy.npz
+
+# Trained model weights (regenerable via notebooks)
+models/*.h5
+models/*.weights.h5
+models/*.keras
+models/*.pkl
+models/*.tgz
+
+# Processed / generated data (regenerable)
+data/processed/*.npy
+data/synthetic/*.csv
+
+# Per-ticker DRL TimeGAN outputs (generated data, models, tfevents)
+time_gan_drl_perticker/*/events.out.tfevents.*
+time_gan_drl_perticker/*/generated_data.npy
+time_gan_drl_perticker/*/synthetic_data.keras
+time_gan_drl_perticker/*.h5

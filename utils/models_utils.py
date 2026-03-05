@@ -1,0 +1,137 @@
+import numpy as np
+import tensorflow as tf
+
+
+def save_model(model, path):
+    model.save(path)
+
+
+# Add to discriminator loss calculation:
+def compute_gradient_penalty(real_samples, fake_samples, discriminator):
+    # Cast to float32 to resolve dtype mismatch
+    real_samples = tf.cast(real_samples, tf.float32)
+    fake_samples = tf.cast(fake_samples, tf.float32)
+    
+    # Compute interpolated samples
+    alpha = tf.random.uniform([real_samples.shape[0], 1, 1], 0., 1., dtype=tf.float32)
+    interpolated = alpha * real_samples + (1. - alpha) * fake_samples
+    
+    with tf.GradientTape() as gp_tape:
+        gp_tape.watch(interpolated)
+        pred = discriminator(interpolated, training=True)
+    
+    gradients = gp_tape.gradient(pred, interpolated)
+    gradients_norm = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=[1, 2]) + 1e-8)
+    return tf.reduce_mean((gradients_norm - 1.0) ** 2)
+
+def gradient_penalty(real_samples, fake_samples, discriminator):
+    alpha = tf.random.uniform([tf.shape(real_samples)[0], 1, 1], 0., 1.)
+    interpolates = alpha * real_samples + (1 - alpha) * fake_samples
+    with tf.GradientTape() as tape:
+        tape.watch(interpolates)
+        pred = discriminator(interpolates)
+    grads = tape.gradient(pred, [interpolates])[0]
+    penalty = tf.reduce_mean((tf.norm(grads, axis=[1,2]) - 1.0) ** 2)
+    return penalty
+
+
+def smooth_positive_labels(y):
+	return y - 0.3 + (tf.random.uniform(tf.shape(y)) * 0.5)
+
+def smooth_negative_labels(y):
+	return y + tf.random.uniform(tf.shape(y)) * 0.3
+
+
+def progressive_label_smoothing(epoch, labels, min_smooth_real=0.8, max_smooth_real=0.95, 
+                                min_smooth_fake=0.05, max_smooth_fake=0.2):
+    """
+    Applies progressive label smoothing to both real (1s) and fake (0s) labels over epochs.
+
+    Args:
+        epoch (int): Current training epoch.
+        labels (tensor): Tensor of real (1s) or fake (0s) labels.
+        min_smooth_real (float): Minimum smoothing factor for real labels.
+        max_smooth_real (float): Maximum smoothing factor for real labels.
+        min_smooth_fake (float): Minimum smoothing factor for fake labels.
+        max_smooth_fake (float): Maximum smoothing factor for fake labels.
+
+    Returns:
+        Tensor: Smoothed labels.
+    """
+    # Progressive smoothing factor using exponential decay
+    smoothing_factor = min_smooth_real + (max_smooth_real - min_smooth_real) * (1 - np.exp(-epoch / 50))
+    
+    # Apply smoothing to real labels (1s) and fake labels (0s) separately
+    smoothed_labels = tf.where(
+        labels > 0.5,  # Real labels (1s)
+        labels * smoothing_factor + (1 - smoothing_factor) * 0.5,  # Shift 1s down slightly
+        labels * (1 - smoothing_factor) + (smoothing_factor * min_smooth_fake)  # Shift 0s up slightly
+    )
+    
+    return smoothed_labels
+
+
+class AdaptiveLearningRate(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, initial_lr, target_ratio, adjustment_factor):
+        self.initial_lr = initial_lr
+        self.target_ratio = target_ratio  # Target ratio (e.g., D_loss should be ~0.8 * G_loss)
+        self.adjustment_factor = adjustment_factor
+    def __call__(self, d_loss, g_loss, name):
+        ratio = d_loss / (g_loss + 1e-8)  # Avoid division by zero
+        # Determine new learning rate based on ratio
+        if ratio < self.target_ratio:
+            new_lr = self.initial_lr * self.adjustment_factor
+            print(f"Increasing {name} lr: {new_lr}")
+        elif ratio > self.target_ratio:
+            new_lr = self.initial_lr / self.adjustment_factor
+            print(f"Decreasing {name} lr: {new_lr}")
+        else:
+            new_lr = self.initial_lr  # Keep LR constant
+        
+        # Update the initial_lr for the next epoch so that adjustments are cumulative
+        self.initial_lr = new_lr  
+        return new_lr
+
+class BalancedAdaptiveLearningRateSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, 
+                 initial_gen_lr, 
+                 initial_disc_lr, 
+                 adjustment_factor=1.2, 
+                 tolerance=0.05, 
+                 min_lr=1e-6,
+                 max_lr=1e-2):
+        self.gen_lr = initial_gen_lr
+        self.disc_lr = initial_disc_lr
+        self.adjustment_factor = adjustment_factor
+        self.tolerance = tolerance
+        self.min_lr = min_lr
+        self.max_lr = max_lr
+
+    def __call__(self, d_loss, g_loss):
+        ratio = d_loss / (g_loss + 1e-8)
+        print(f"Current d_loss/g_loss ratio: {ratio:.2f}")
+
+        # If within the tolerance, return current rates.
+        if abs(ratio - 1.0) < self.tolerance:
+            print(f"Learning rates remain unchanged. "
+                  f"gen_lr: {self.gen_lr:.2e}, disc_lr: {self.disc_lr:.2e}")
+            return self.gen_lr, self.disc_lr
+
+        if ratio > 1:
+            # Discriminator loss is higher: REDUCE disc LR to stabilize it
+            new_disc_lr = self.disc_lr / self.adjustment_factor  # CHANGED: now reducing
+            new_gen_lr = self.gen_lr * self.adjustment_factor   # Give generator more freedom
+            print(f"Adjusting: Decreasing discriminator lr to {new_disc_lr:.2e} "
+                  f"and increasing generator lr to {new_gen_lr:.2e}")
+        else:
+            # Generator loss is higher: REDUCE gen LR to stabilize it
+            new_disc_lr = self.disc_lr * self.adjustment_factor  # Give discriminator more freedom
+            new_gen_lr = self.gen_lr / self.adjustment_factor   # CHANGED: now reducing
+            print(f"Adjusting: Increasing discriminator lr to {new_disc_lr:.2e} "
+                  f"and decreasing generator lr to {new_gen_lr:.2e}")
+
+        # Enforce min/max constraints
+        self.gen_lr = max(min(new_gen_lr, self.max_lr), self.min_lr)
+        self.disc_lr = max(min(new_disc_lr, self.max_lr), self.min_lr)
+
+        return self.gen_lr, self.disc_lr
