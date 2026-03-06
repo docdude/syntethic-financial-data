@@ -138,42 +138,54 @@ class BalancedAdaptiveLearningRateSchedule(tf.keras.optimizers.schedules.Learnin
     def __init__(self, 
                  initial_gen_lr, 
                  initial_disc_lr, 
-                 adjustment_factor=1.2, 
-                 tolerance=0.05, 
-                 min_lr=1e-6,
-                 max_lr=1e-2):
+                 adjustment_factor=1.1, 
+                 tolerance=0.2, 
+                 min_lr=1e-5,
+                 max_lr=5e-4,
+                 max_lr_ratio=5.0):
         self.gen_lr = initial_gen_lr
         self.disc_lr = initial_disc_lr
         self.adjustment_factor = adjustment_factor
         self.tolerance = tolerance
         self.min_lr = min_lr
         self.max_lr = max_lr
+        self.max_lr_ratio = max_lr_ratio  # max allowed ratio between disc/gen LRs
 
     def __call__(self, d_loss, g_loss):
         ratio = d_loss / (g_loss + 1e-8)
         print(f"Current d_loss/g_loss ratio: {ratio:.2f}")
 
-        # If within the tolerance, return current rates.
+        # If within the tolerance band [1-tol, 1+tol], no adjustment needed
         if abs(ratio - 1.0) < self.tolerance:
-            print(f"Learning rates remain unchanged. "
-                  f"gen_lr: {self.gen_lr:.2e}, disc_lr: {self.disc_lr:.2e}")
+            print(f"  → In equilibrium band. LRs unchanged: "
+                  f"gen={self.gen_lr:.2e}, disc={self.disc_lr:.2e}")
             return self.gen_lr, self.disc_lr
 
         if ratio > 1:
             # Discriminator loss is higher: REDUCE disc LR to stabilize it
-            new_disc_lr = self.disc_lr / self.adjustment_factor  # CHANGED: now reducing
-            new_gen_lr = self.gen_lr * self.adjustment_factor   # Give generator more freedom
-            print(f"Adjusting: Decreasing discriminator lr to {new_disc_lr:.2e} "
-                  f"and increasing generator lr to {new_gen_lr:.2e}")
+            new_disc_lr = self.disc_lr / self.adjustment_factor
+            new_gen_lr = self.gen_lr * self.adjustment_factor
+            print(f"  → D losing: disc_lr ↓ {new_disc_lr:.2e}, gen_lr ↑ {new_gen_lr:.2e}")
         else:
             # Generator loss is higher: REDUCE gen LR to stabilize it
-            new_disc_lr = self.disc_lr * self.adjustment_factor  # Give discriminator more freedom
-            new_gen_lr = self.gen_lr / self.adjustment_factor   # CHANGED: now reducing
-            print(f"Adjusting: Increasing discriminator lr to {new_disc_lr:.2e} "
-                  f"and decreasing generator lr to {new_gen_lr:.2e}")
+            new_disc_lr = self.disc_lr * self.adjustment_factor
+            new_gen_lr = self.gen_lr / self.adjustment_factor
+            print(f"  → G losing: disc_lr ↑ {new_disc_lr:.2e}, gen_lr ↓ {new_gen_lr:.2e}")
 
-        # Enforce min/max constraints
-        self.gen_lr = max(min(new_gen_lr, self.max_lr), self.min_lr)
-        self.disc_lr = max(min(new_disc_lr, self.max_lr), self.min_lr)
+        # Enforce per-LR min/max constraints
+        new_gen_lr = max(min(new_gen_lr, self.max_lr), self.min_lr)
+        new_disc_lr = max(min(new_disc_lr, self.max_lr), self.min_lr)
+
+        # Enforce max ratio constraint — prevent runaway divergence
+        lr_ratio = new_disc_lr / (new_gen_lr + 1e-12)
+        if lr_ratio > self.max_lr_ratio:
+            print(f"  → Clamping LR ratio {lr_ratio:.1f}x → {self.max_lr_ratio}x")
+            new_disc_lr = new_gen_lr * self.max_lr_ratio
+        elif lr_ratio < 1.0 / self.max_lr_ratio:
+            print(f"  → Clamping LR ratio {lr_ratio:.2f}x → {1.0/self.max_lr_ratio:.2f}x")
+            new_gen_lr = new_disc_lr * self.max_lr_ratio
+
+        self.gen_lr = new_gen_lr
+        self.disc_lr = new_disc_lr
 
         return self.gen_lr, self.disc_lr
