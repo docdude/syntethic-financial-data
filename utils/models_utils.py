@@ -139,7 +139,7 @@ class BalancedAdaptiveLearningRateSchedule(tf.keras.optimizers.schedules.Learnin
                  initial_gen_lr, 
                  initial_disc_lr, 
                  adjustment_factor=1.1, 
-                 tolerance=0.2, 
+                 tolerance=0.4, 
                  min_lr=1e-5,
                  max_lr=5e-4,
                  max_lr_ratio=5.0):
