@@ -855,6 +855,191 @@ def compute_discriminative_score(real_data, synthetic_data,
     return {'accuracy': float(acc), 'score': float(abs(0.5 - acc))}
 
 
+# =====================================================================
+# QuantGAN-style Metrics  (Wiese et al., 2020 — arXiv:1907.06673)
+# =====================================================================
+# Three metrics from the original Quant GANs paper:
+#   1. DY metric  — log-density divergence at multiple time lags
+#   2. ACF score  — L2 norm of ACF difference for f(x)=x, x², |x|
+#   3. Leverage effect score — Corr(r_{t+τ}², r_t) comparison
+# =====================================================================
+
+from scipy.stats import wasserstein_distance as _scipy_wasserstein
+
+
+def compute_dy_metric(real_series, synthetic_series, lags=(1, 5, 20, 100),
+                      n_bins=50):
+    """DY metric (Drǎgulescu & Yakovenko, 2002) at multiple time lags.
+
+    For each lag t, compute t-differenced log returns from both real and
+    synthetic series, bin them so that log P_real(bin) ≈ const, then sum
+    |log P_real - log P_synth| over bins.
+
+    Args:
+        real_series:      1-D array of log returns (or scaled values)
+        synthetic_series: 1-D array of log returns (or scaled values)
+        lags:             tuple of integer lags  (default: 1, 5, 20, 100)
+        n_bins:           number of histogram bins
+
+    Returns:
+        dict  {'DY(1)': float, 'DY(5)': float, ...}
+    """
+    real_series = np.asarray(real_series, dtype=np.float64).ravel()
+    synthetic_series = np.asarray(synthetic_series, dtype=np.float64).ravel()
+
+    results = {}
+    for lag in lags:
+        # t-differenced series
+        if lag >= len(real_series) or lag >= len(synthetic_series):
+            results[f'DY({lag})'] = float('nan')
+            continue
+
+        real_diff = real_series[lag:] - real_series[:-lag]
+        synth_diff = synthetic_series[lag:] - synthetic_series[:-lag]
+
+        # Build bins from real data (equal-count quantile bins)
+        edges = np.percentile(real_diff,
+                              np.linspace(0, 100, n_bins + 1))
+        # Ensure strictly increasing
+        edges[-1] += 1e-10
+        for i in range(1, len(edges)):
+            if edges[i] <= edges[i - 1]:
+                edges[i] = edges[i - 1] + 1e-10
+
+        # Compute normalised histograms
+        real_counts, _ = np.histogram(real_diff, bins=edges)
+        synth_counts, _ = np.histogram(synth_diff, bins=edges)
+
+        # Convert to densities (add small epsilon to avoid log(0))
+        eps = 1e-10
+        real_p = real_counts / (real_counts.sum() + eps) + eps
+        synth_p = synth_counts / (synth_counts.sum() + eps) + eps
+
+        # DY = Σ |log P_real - log P_synth|
+        dy_val = float(np.sum(np.abs(np.log(real_p) - np.log(synth_p))))
+        results[f'DY({lag})'] = dy_val
+
+    return results
+
+
+def compute_quantgan_acf_score(real_series, synthetic_series,
+                               max_lag=250, n_paths=None):
+    """ACF score from QuantGAN (Wiese et al., 2020).
+
+    Computes L2 norm of the ACF difference between real and synthetic
+    for three transforms:
+      - f(x) = x        (serial autocorrelation)
+      - f(x) = x²       (squared — volatility clustering)
+      - f(x) = |x|      (absolute — volatility clustering)
+
+    For single long series (not multiple paths), computes ACF directly.
+
+    Args:
+        real_series:      1-D array of log returns
+        synthetic_series: 1-D array of log returns
+        max_lag:          number of ACF lags (paper uses 250)
+
+    Returns:
+        dict with:
+          'acf_identity': float  — ACF(f(x)=x) L2 score
+          'acf_squared':  float  — ACF(f(x)=x²) L2 score
+          'acf_absolute': float  — ACF(f(x)=|x|) L2 score
+    """
+    real_series = np.asarray(real_series, dtype=np.float64).ravel()
+    synthetic_series = np.asarray(synthetic_series, dtype=np.float64).ravel()
+
+    def _acf_full(series, max_lag):
+        """ACF for lags 1..max_lag on a single long series."""
+        mean = np.mean(series)
+        var = np.var(series)
+        if var < 1e-12:
+            return np.zeros(max_lag)
+        centered = series - mean
+        n = len(series)
+        acf = np.array([
+            np.sum(centered[:n - lag] * centered[lag:]) / (n * var)
+            for lag in range(1, max_lag + 1)
+        ])
+        return acf
+
+    # Clamp max_lag to available data
+    effective_lag = min(max_lag, len(real_series) - 1,
+                        len(synthetic_series) - 1)
+
+    transforms = {
+        'acf_identity': lambda x: x,
+        'acf_squared':  lambda x: x ** 2,
+        'acf_absolute': lambda x: np.abs(x),
+    }
+
+    results = {}
+    for name, f in transforms.items():
+        r_acf = _acf_full(f(real_series), effective_lag)
+        s_acf = _acf_full(f(synthetic_series), effective_lag)
+        results[name] = float(np.sqrt(np.sum((r_acf - s_acf) ** 2)))
+
+    return results
+
+
+def compute_leverage_effect_score(real_series, synthetic_series, max_lag=250):
+    """Leverage effect score from QuantGAN (Wiese et al., 2020).
+
+    Measures the asymmetric correlation between squared future returns
+    and current returns:  L(τ) = Corr(r_{t+τ}², r_t)
+
+    The score is the L2 norm of the difference between real and
+    synthetic leverage curves.
+
+    Args:
+        real_series:      1-D array of log returns
+        synthetic_series: 1-D array of log returns
+        max_lag:          number of lags (paper uses 250)
+
+    Returns:
+        dict with:
+          'leverage_score': float  — L2 norm of leverage effect difference
+          'leverage_real':  array  — real leverage curve
+          'leverage_synth': array  — synthetic leverage curve
+    """
+    real_series = np.asarray(real_series, dtype=np.float64).ravel()
+    synthetic_series = np.asarray(synthetic_series, dtype=np.float64).ravel()
+
+    def _leverage_curve(series, max_lag):
+        """Compute L(τ) = Corr(r_{t+τ}², r_t) for τ = 1..max_lag."""
+        n = len(series)
+        sq = series ** 2
+        mean_r = np.mean(series)
+        std_r = np.std(series)
+        mean_sq = np.mean(sq)
+        std_sq = np.std(sq)
+
+        if std_r < 1e-12 or std_sq < 1e-12:
+            return np.zeros(max_lag)
+
+        lev = np.zeros(max_lag)
+        for tau in range(1, max_lag + 1):
+            if tau >= n:
+                break
+            # Corr(r_{t+τ}², r_t)
+            cov = np.mean((sq[tau:] - mean_sq) * (series[:n - tau] - mean_r))
+            lev[tau - 1] = cov / (std_sq * std_r)
+        return lev
+
+    effective_lag = min(max_lag, len(real_series) - 1,
+                        len(synthetic_series) - 1)
+
+    lev_real = _leverage_curve(real_series, effective_lag)
+    lev_synth = _leverage_curve(synthetic_series, effective_lag)
+
+    score = float(np.sqrt(np.sum((lev_real - lev_synth) ** 2)))
+
+    return {
+        'leverage_score': score,
+        'leverage_real': lev_real,
+        'leverage_synth': lev_synth,
+    }
+
+
 # ── Entropy-based metrics ────────────────────────────────────────
 from math import log2
 from collections import Counter
