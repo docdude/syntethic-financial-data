@@ -113,6 +113,36 @@ def compute_moment_loss(real, fake):
     return loss_std + loss_skew + loss_kurt
 
 
+def compute_tail_loss(real, fake, tail_pct=0.05):
+    """Quantile matching loss: penalise mismatch at distribution tails.
+
+    Sorts both real and fake samples, then computes MSE between the
+    bottom and top ``tail_pct`` quantiles.  This directly targets
+    under-representation of extreme values that moment matching alone
+    can miss (moments summarize globally; this targets the tails).
+
+    Args:
+        real: Tensor of real samples (any shape, will be flattened).
+        fake: Tensor of generated samples (same shape as real).
+        tail_pct: Fraction of each tail to match (default 5%).
+
+    Returns:
+        Scalar loss = MSE(lower tails) + MSE(upper tails).
+    """
+    real_flat = tf.sort(tf.reshape(real, [-1]))
+    fake_flat = tf.sort(tf.reshape(fake, [-1]))
+
+    n = tf.shape(real_flat)[0]
+    k = tf.maximum(tf.cast(tf.cast(n, tf.float32) * tail_pct, tf.int32), 1)
+
+    # Lower tail (smallest k values)
+    lower_loss = tf.reduce_mean(tf.square(real_flat[:k] - fake_flat[:k]))
+    # Upper tail (largest k values)
+    upper_loss = tf.reduce_mean(tf.square(real_flat[-k:] - fake_flat[-k:]))
+
+    return lower_loss + upper_loss
+
+
 class AdaptiveLearningRate(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, initial_lr, target_ratio, adjustment_factor):
         self.initial_lr = initial_lr
