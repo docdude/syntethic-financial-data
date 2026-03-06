@@ -71,6 +71,48 @@ def progressive_label_smoothing(epoch, labels, min_smooth_real=0.8, max_smooth_r
     return smoothed_labels
 
 
+def compute_moment_loss(real, fake):
+    """Moment matching loss: penalise differences in std, skewness, kurtosis.
+
+    All statistics are computed over the flattened batch so every
+    generated window contributes to a single set of moments.
+    Operates in the same [0,1] scaled space as the rest of training.
+
+    Args:
+        real: Tensor of real samples (any shape, will be flattened).
+        fake: Tensor of generated samples (same shape as real).
+
+    Returns:
+        Scalar loss = relative_std_gap + |skew_diff| + |kurt_diff|.
+    """
+    real_flat = tf.reshape(real, [-1])
+    fake_flat = tf.reshape(fake, [-1])
+
+    # Mean & std
+    mu_r, mu_f = tf.reduce_mean(real_flat), tf.reduce_mean(fake_flat)
+    std_r = tf.math.reduce_std(real_flat) + 1e-8
+    std_f = tf.math.reduce_std(fake_flat) + 1e-8
+
+    # Standardised residuals
+    z_r = (real_flat - mu_r) / std_r
+    z_f = (fake_flat - mu_f) / std_f
+
+    # Skewness (3rd standardised moment)
+    skew_r = tf.reduce_mean(z_r ** 3)
+    skew_f = tf.reduce_mean(z_f ** 3)
+
+    # Kurtosis (4th standardised moment, excess)
+    kurt_r = tf.reduce_mean(z_r ** 4) - 3.0
+    kurt_f = tf.reduce_mean(z_f ** 4) - 3.0
+
+    # L1 penalties — each term has natural scale ~O(1)
+    loss_std = tf.abs(std_r - std_f) / std_r      # relative std gap
+    loss_skew = tf.abs(skew_r - skew_f)
+    loss_kurt = tf.abs(kurt_r - kurt_f)
+
+    return loss_std + loss_skew + loss_kurt
+
+
 class AdaptiveLearningRate(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, initial_lr, target_ratio, adjustment_factor):
         self.initial_lr = initial_lr
