@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import numpy as np
 import tensorflow as tf
 from scipy.linalg import sqrtm
@@ -1339,4 +1340,264 @@ def compute_microstructure_metrics(real_high, real_low, real_close,
         'bp_vol_synth': bp_synth,
         'cs_spread_real': cs_real,
         'cs_spread_synth': cs_synth,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ══  Stylized Facts Metrics (Bouchaud et al. / Econophysics)         ══
+# ══════════════════════════════════════════════════════════════════════
+
+def compute_leverage_effect_bouchaud(real_series, synthetic_series,
+                                      min_lag=1, max_lag=100):
+    """Leverage effect using Bouchaud et al. (2001) formulation.
+
+    This is the canonical econophysics definition:
+        L(t) = [E[r_s · |r_{s+t}|²] - E[r] · E[|r|²]] / (E[|r|²])²
+
+    Measures asymmetric volatility response: negative returns predict
+    higher future volatility (Black, 1976; Christie, 1982).
+
+    Different from QuantGAN's Pearson correlation formulation — this
+    version preserves magnitude information and is unbounded.
+
+    Args:
+        real_series:      1-D array of log returns
+        synthetic_series: 1-D array of log returns
+        min_lag:          minimum lag (default 1)
+        max_lag:          maximum lag (default 100)
+
+    Returns:
+        dict with:
+          'leverage_score_bouchaud': L2 norm of difference
+          'leverage_real':  array of leverage values for real
+          'leverage_synth': array of leverage values for synthetic
+          'lags':           array of lag values
+    """
+    def _compute_leverage_curve(x, min_lag, max_lag):
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_abs = np.abs(x)
+        Z = np.mean(x_abs ** 2) ** 2
+        second_term = np.mean(x) * np.mean(x_abs ** 2)
+
+        if Z < 1e-12:
+            return np.zeros(max_lag - min_lag)
+
+        def compute_for_t(t):
+            if t == 0:
+                first_term = np.mean(x * (x_abs ** 2))
+            elif t > 0:
+                first_term = np.mean(x[:-t] * (x_abs[t:] ** 2))
+            else:
+                first_term = np.mean(x[-t:] * (x_abs[:t] ** 2))
+            return (first_term - second_term) / Z
+
+        levs = np.array([compute_for_t(t) for t in range(min_lag, max_lag)])
+        return levs
+
+    lev_real = _compute_leverage_curve(real_series, min_lag, max_lag)
+    lev_synth = _compute_leverage_curve(synthetic_series, min_lag, max_lag)
+
+    score = float(np.sqrt(np.sum((lev_real - lev_synth) ** 2)))
+
+    return {
+        'leverage_score_bouchaud': score,
+        'leverage_real': lev_real,
+        'leverage_synth': lev_synth,
+        'lags': np.arange(min_lag, max_lag),
+    }
+
+
+def compute_volatility_clustering_acf(real_series, synthetic_series,
+                                       max_lag=1000, for_abs=True):
+    """Volatility clustering via autocorrelation of absolute returns.
+
+    The slow decay of ACF(|r|) is a key stylized fact of financial
+    returns (Cont, 2001). This computes ACF and compares real vs synthetic.
+
+    Args:
+        real_series:      1-D array of log returns
+        synthetic_series: 1-D array of log returns
+        max_lag:          maximum lag for ACF computation
+        for_abs:          if True, compute ACF of |r| (volatility clustering)
+                          if False, compute ACF of r (returns — should be ~0)
+
+    Returns:
+        dict with:
+          'acf_score': L2 norm of ACF difference
+          'acf_rmse':  RMSE of ACF difference
+          'acf_real':  ACF values for real data
+          'acf_synth': ACF values for synthetic data
+          'decay_real':  estimated power-law decay exponent (real)
+          'decay_synth': estimated power-law decay exponent (synthetic)
+    """
+    def _acf(x, max_lag):
+        x = np.asarray(x, dtype=np.float64).ravel()
+        n = len(x)
+        max_lag = min(max_lag, n - 1)
+        mean = np.mean(x)
+        var = np.var(x)
+        if var < 1e-12:
+            return np.zeros(max_lag)
+
+        acf_vals = np.zeros(max_lag)
+        for k in range(1, max_lag + 1):
+            cov = np.mean((x[:-k] - mean) * (x[k:] - mean))
+            acf_vals[k - 1] = cov / var
+        return acf_vals
+
+    real = np.asarray(real_series, dtype=np.float64).ravel()
+    synth = np.asarray(synthetic_series, dtype=np.float64).ravel()
+
+    if for_abs:
+        real = np.abs(real)
+        synth = np.abs(synth)
+
+    effective_lag = min(max_lag, len(real) - 1, len(synth) - 1)
+
+    acf_real = _acf(real, effective_lag)
+    acf_synth = _acf(synth, effective_lag)
+
+    # L2 score and RMSE
+    score = float(np.sqrt(np.sum((acf_real - acf_synth) ** 2)))
+    rmse = float(np.sqrt(np.mean((acf_real - acf_synth) ** 2)))
+
+    # Estimate power-law decay: ACF(k) ~ k^(-α)
+    # Fit log(ACF) vs log(k) for positive ACF values
+    def _estimate_decay(acf_vals):
+        lags = np.arange(1, len(acf_vals) + 1)
+        mask = acf_vals > 0
+        if np.sum(mask) < 10:
+            return np.nan
+        log_lags = np.log(lags[mask])
+        log_acf = np.log(acf_vals[mask])
+        # Linear regression: log(ACF) = -α * log(k) + c
+        slope, _ = np.polyfit(log_lags, log_acf, 1)
+        return -slope  # α (positive for decay)
+
+    decay_real = _estimate_decay(acf_real)
+    decay_synth = _estimate_decay(acf_synth)
+
+    return {
+        'acf_score': score,
+        'acf_rmse': rmse,
+        'acf_real': acf_real,
+        'acf_synth': acf_synth,
+        'decay_real': decay_real,
+        'decay_synth': decay_synth,
+    }
+
+
+def compute_tail_distribution_metrics(real_series, synthetic_series,
+                                        n_bins=100, normalize=True):
+    """Fat-tail distribution comparison.
+
+    Computes normalized PDF and compares tail behavior between real
+    and synthetic returns. Key stylized fact: financial returns have
+    power-law tails heavier than Gaussian (Cont, 2001).
+
+    Args:
+        real_series:      1-D array of log returns
+        synthetic_series: 1-D array of log returns
+        n_bins:           number of bins for PDF estimation
+        normalize:        if True, z-score normalize before comparison
+
+    Returns:
+        dict with:
+          'pdf_rmse':      RMSE between PDFs
+          'tail_ratio_5':  ratio of 5% tail mass (synth/real)
+          'tail_ratio_1':  ratio of 1% tail mass (synth/real)
+          'kurtosis_real': excess kurtosis of real
+          'kurtosis_synth': excess kurtosis of synthetic
+          'hill_real':     Hill estimator of tail index (real)
+          'hill_synth':    Hill estimator of tail index (synthetic)
+          'pdf_x':         bin centers
+          'pdf_real':      PDF values for real
+          'pdf_synth':     PDF values for synthetic
+    """
+    from scipy.stats import kurtosis as scipy_kurtosis
+
+    def _normalize_series(x):
+        x = np.asarray(x, dtype=np.float64).ravel()
+        mean = np.mean(x)
+        std = np.std(x)
+        if std < 1e-12:
+            return x - mean
+        return (x - mean) / std
+
+    def _compute_pdf(x, bins_x):
+        diff = bins_x[1] - bins_x[0]
+        pdf_y = np.zeros(len(bins_x) - 1)
+        for i, (x1, x2) in enumerate(zip(bins_x[:-1], bins_x[1:])):
+            pdf_y[i] = np.sum((x > x1) & (x <= x2))
+        pdf_y = pdf_y / len(x)  # normalize to probability
+        bin_centers = (bins_x[:-1] + bins_x[1:]) / 2
+        return bin_centers, pdf_y
+
+    def _hill_estimator(x, k=None):
+        """Hill estimator for tail index α (power-law: P(X > x) ~ x^(-α))."""
+        x = np.abs(x)
+        x = x[x > 0]  # discard zeros to avoid log(0)
+        if len(x) < 20:
+            return np.nan
+        x_sorted = np.sort(x)[::-1]  # descending
+        n = len(x_sorted)
+        if k is None:
+            k = max(10, int(0.05 * n))  # top 5%
+        k = min(k, n - 1)
+        if k < 2 or x_sorted[k] <= 0:
+            return np.nan
+        log_ratios = np.log(x_sorted[:k]) - np.log(x_sorted[k])
+        denom = np.sum(log_ratios)
+        if denom <= 0:
+            return np.nan
+        return k / denom
+
+    real = np.asarray(real_series, dtype=np.float64).ravel()
+    synth = np.asarray(synthetic_series, dtype=np.float64).ravel()
+
+    if normalize:
+        real = _normalize_series(real)
+        synth = _normalize_series(synth)
+
+    # PDF computation with common bins
+    x_min, x_max = -5.0, 5.0
+    bins_x = np.linspace(x_min, x_max, n_bins + 1)
+    pdf_x, pdf_real = _compute_pdf(real, bins_x)
+    _, pdf_synth = _compute_pdf(synth, bins_x)
+
+    # RMSE between PDFs
+    pdf_rmse = float(np.sqrt(np.mean((pdf_real - pdf_synth) ** 2)))
+
+    # Tail mass ratios (5% and 1% tails)
+    # Thresholds are defined by the REAL distribution and applied to both,
+    # so the ratio reveals whether synthetic has heavier/lighter tails.
+    def _tail_mass_ratio(real_data, synth_data, pct):
+        lower = np.percentile(real_data, pct * 100)
+        upper = np.percentile(real_data, (1 - pct) * 100)
+        mass_real = np.mean((real_data < lower) | (real_data > upper))
+        mass_synth = np.mean((synth_data < lower) | (synth_data > upper))
+        return mass_synth / mass_real if mass_real > 0 else np.nan
+
+    tail_ratio_5 = _tail_mass_ratio(real, synth, 0.05)
+    tail_ratio_1 = _tail_mass_ratio(real, synth, 0.01)
+
+    # Kurtosis
+    kurt_real = float(scipy_kurtosis(real, fisher=True))
+    kurt_synth = float(scipy_kurtosis(synth, fisher=True))
+
+    # Hill estimator
+    hill_real = _hill_estimator(real)
+    hill_synth = _hill_estimator(synth)
+
+    return {
+        'pdf_rmse': pdf_rmse,
+        'tail_ratio_5': tail_ratio_5,
+        'tail_ratio_1': tail_ratio_1,
+        'kurtosis_real': kurt_real,
+        'kurtosis_synth': kurt_synth,
+        'hill_real': hill_real,
+        'hill_synth': hill_synth,
+        'pdf_x': pdf_x,
+        'pdf_real': pdf_real,
+        'pdf_synth': pdf_synth,
     }
