@@ -923,7 +923,7 @@ def compute_dy_metric(real_series, synthetic_series, lags=(1, 5, 20, 100),
     return results
 
 
-def compute_quantgan_acf_score(real_series, synthetic_series,
+def compute_quantgan_acf_score(real_data, synthetic_data,
                                max_lag=250, n_paths=None):
     """ACF score from QuantGAN (Wiese et al., 2020).
 
@@ -933,39 +933,57 @@ def compute_quantgan_acf_score(real_series, synthetic_series,
       - f(x) = x²       (squared — volatility clustering)
       - f(x) = |x|      (absolute — volatility clustering)
 
-    For single long series (not multiple paths), computes ACF directly.
+    Supports two input modes:
+      1. **Windowed** — (N, T) array of independent windows/paths.
+         Computes per-window ACF (lags 1..min(max_lag, T-1)), averages
+         across N windows (like the paper averages over M generated paths),
+         then takes L2 norm of the difference.
+      2. **Contiguous** — 1-D array treated as a single long series.
+         Computes ACF directly at lags 1..max_lag.
+
+    The windowed mode avoids the boundary-artifact problem that occurs
+    when independent windows are naively flattened into one series
+    (artificial jumps at every T-th step corrupt the ACF).
 
     Args:
-        real_series:      1-D array of log returns
-        synthetic_series: 1-D array of log returns
-        max_lag:          number of ACF lags (paper uses 250)
+        real_data:      (N, T) windowed array  -or-  1-D array of log returns
+        synthetic_data: (N, T) windowed array  -or-  1-D array of log returns
+        max_lag:        number of ACF lags (paper uses S=250;
+                        auto-capped to T-1 for windowed mode)
 
     Returns:
         dict with:
           'acf_identity': float  — ACF(f(x)=x) L2 score
           'acf_squared':  float  — ACF(f(x)=x²) L2 score
           'acf_absolute': float  — ACF(f(x)=|x|) L2 score
+          'max_lag':      int    — effective number of lags used
+          'mode':         str    — 'windowed' or 'contiguous'
     """
-    real_series = np.asarray(real_series, dtype=np.float64).ravel()
-    synthetic_series = np.asarray(synthetic_series, dtype=np.float64).ravel()
+    real_data = np.asarray(real_data, dtype=np.float64)
+    synthetic_data = np.asarray(synthetic_data, dtype=np.float64)
 
-    def _acf_full(series, max_lag):
-        """ACF for lags 1..max_lag on a single long series."""
+    def _acf_single(series, max_lag):
+        """ACF for lags 1..max_lag on a single series."""
         mean = np.mean(series)
         var = np.var(series)
         if var < 1e-12:
             return np.zeros(max_lag)
         centered = series - mean
         n = len(series)
-        acf = np.array([
+        return np.array([
             np.sum(centered[:n - lag] * centered[lag:]) / (n * var)
             for lag in range(1, max_lag + 1)
         ])
-        return acf
 
-    # Clamp max_lag to available data
-    effective_lag = min(max_lag, len(real_series) - 1,
-                        len(synthetic_series) - 1)
+    def _acf_windowed(windows, max_lag):
+        """Average ACF across N independent windows of length T.
+
+        For each window, compute ACF at lags 1..max_lag, then average
+        across all N windows (analogous to QuantGAN averaging over M
+        generated paths).
+        """
+        per_window = np.array([_acf_single(w, max_lag) for w in windows])
+        return np.mean(per_window, axis=0)
 
     transforms = {
         'acf_identity': lambda x: x,
@@ -973,12 +991,32 @@ def compute_quantgan_acf_score(real_series, synthetic_series,
         'acf_absolute': lambda x: np.abs(x),
     }
 
+    # Determine mode from input shape
+    windowed = (real_data.ndim == 2 and synthetic_data.ndim == 2)
+
+    if windowed:
+        T = min(real_data.shape[1], synthetic_data.shape[1])
+        effective_lag = min(max_lag, T - 1)
+        mode = 'windowed'
+    else:
+        real_data = real_data.ravel()
+        synthetic_data = synthetic_data.ravel()
+        effective_lag = min(max_lag, len(real_data) - 1,
+                            len(synthetic_data) - 1)
+        mode = 'contiguous'
+
     results = {}
     for name, f in transforms.items():
-        r_acf = _acf_full(f(real_series), effective_lag)
-        s_acf = _acf_full(f(synthetic_series), effective_lag)
+        if windowed:
+            r_acf = _acf_windowed(f(real_data), effective_lag)
+            s_acf = _acf_windowed(f(synthetic_data), effective_lag)
+        else:
+            r_acf = _acf_single(f(real_data), effective_lag)
+            s_acf = _acf_single(f(synthetic_data), effective_lag)
         results[name] = float(np.sqrt(np.sum((r_acf - s_acf) ** 2)))
 
+    results['max_lag'] = effective_lag
+    results['mode'] = mode
     return results
 
 
