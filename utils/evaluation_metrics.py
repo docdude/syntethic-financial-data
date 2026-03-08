@@ -1013,7 +1013,11 @@ def compute_quantgan_acf_score(real_data, synthetic_data,
         else:
             r_acf = _acf_single(f(real_data), effective_lag)
             s_acf = _acf_single(f(synthetic_data), effective_lag)
-        results[name] = float(np.sqrt(np.sum((r_acf - s_acf) ** 2)))
+        diff_sq = (r_acf - s_acf) ** 2
+        l2 = float(np.sqrt(np.sum(diff_sq)))
+        mse = float(np.mean(diff_sq))          # MiT-WGAN convention
+        results[name] = l2                      # QuantGAN convention
+        results[name + '_mse'] = mse
 
     results['max_lag'] = effective_lag
     results['mode'] = mode
