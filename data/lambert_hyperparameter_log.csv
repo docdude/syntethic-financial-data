@@ -1,0 +1,5 @@
+timestamp,epochs,batch_size,sequence_length,latent_dim,nfilt,n_stacks,lr_generator,lr_discriminator,beta_1,lambda_adv,lambda_recon,lambda_moment,lambda_tail,huber_delta,lr_adjust_every,min_lr,max_lr,gen_output,preprocessing,gaussianize_delta
+2026-03-19 11:59:55,2000,128,24,32,32,2,0.0002,0.0001,0.5,1.0,1.0,5.0,50.0,0.5,50,3e-06,0.0005,linear,StandardScaler→Gaussianize→StandardScaler,1.712321655475345
+2026-03-19 18:21:02,3000,128,24,32,32,2,0.0002,0.0001,0.5,1.0,1.0,7.0,50.0,0.5,50,3e-06,0.0005,linear,StandardScaler→Gaussianize→StandardScaler,1.712321655475345
+2026-03-19 21:39:41,3000,128,24,32,32,2,0.0002,0.0001,0.5,1.0,1.0,7.0,50.0,0.5,50,3e-06,0.0005,linear,StandardScaler→Gaussianize→StandardScaler,1.712321655475345
+2026-03-20 08:11:25,3000,128,24,32,32,2,0.0002,0.0001,0.5,1.0,1.0,5.0,50.0,0.5,50,3e-06,0.0005,linear,StandardScaler→Gaussianize→StandardScaler,1.712321655475345
